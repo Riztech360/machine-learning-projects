@@ -140,7 +140,7 @@ def trips_join_fares(base_path, year, month, df1, df2):
 
 def main():
     #### parameters ### 
-    base_path = 'your/path/here/' + '/Machine-Learning-Projects/nyc_taxi_trips_and_fares/dataset_files/'
+    base_path = 'your/path/here/' + '/Machine-Learning-Projects/nyc_taxi_trips_and_fares/'
     folder_names_list = ['trips_data','fares_data']
     file_start_number = 1
     file_end_number   = 2
