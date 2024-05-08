@@ -1,4 +1,5 @@
 import os
+import shutil
 import pandas as pd
 import numpy as np
 from geopy.geocoders import Nominatim
@@ -9,9 +10,11 @@ from pyspark.sql.types import (StructField, StructType, StringType, IntegerType,
                               FloatType, DecimalType, TimestampNTZType)
 
 
-def csv_reader(base_path, folder_name, file_number):
-    path = base_path + folder_name + '/' + folder_name + '_' + str(file_number) + '.csv'
+def csv_reader_and_partition(base_path, folder_name, file_number):
+    path_to_read = base_path + 'original_dataset/'    + folder_name + '/' + folder_name + '_' + str(file_number) + '.csv'
+    path_to_save = base_path + 'partitioned_dataset/' + folder_name + '/'
     schema = 'Hello Kitty'
+    drop_unnecessary_columns_list = []
 
     # schema structure for trips data
     if folder_name == 'trips_data':
@@ -32,6 +35,9 @@ def csv_reader(base_path, folder_name, file_number):
             StructField('dropoff_latitude',DecimalType(9,6),True)
         ])
 
+        drop_unnecessary_columns_list = ['rate_code','store_and_fwd_flag','dropoff_datetime','passenger_count',
+                                      'dropoff_latitude','dropoff_longitude']
+
     # schema structure for fares data
     else:
         schema = StructType([
@@ -47,24 +53,28 @@ def csv_reader(base_path, folder_name, file_number):
             StructField('tolls_amount',FloatType(),True),
             StructField('total_amount',FloatType(),True)
         ])
+
+        drop_unnecessary_columns_list = ['payment_type','surcharge','mta_tax','tolls_amount']
     
-    #read csv file
-    df_original = spark.read\
+    #read csv file and partition it by year and month
+    spark.read\
     .option("delimiter",",")\
     .option("header", "true")\
     .schema(schema)\
-    .csv(path)\
-    .limit(20)
+    .csv(path_to_read)\
+    .withColumn('year',year(col('pickup_datetime')))\
+    .withColumn('month',month(col('pickup_datetime')))\
+    .drop(*drop_unnecessary_columns_list)\
+    .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path_to_save)
 
-    return df_original
+    return None
 
-def drop_nulls_and_track(base_path, folder_name, file_number, df):
-    unnecessary_trips_columns_list = ['rate_code','store_and_fwd_flag','dropoff_datetime','passenger_count',
-                                      'dropoff_latitude','dropoff_longitude']
-    
-    unnecessary_fares_columns_list = ['payment_type','surcharge','mta_tax','tolls_amount']
+def track_and_standardize(base_path, folder_name, year, month):
+    path_to_read =  base_path + 'partitioned_dataset/' + folder_name + f'year={year}/month={month}/*' 
+    path_to_save =  base_path + 'processed_dataset/'   + folder_name + f'year={year}/month={month}/'
+    df = spark.read.parquet(path_to_read)
 
-    if folder_name == 'trips_data': 
+    if folder_name == 'trip_data': 
         df = df.withColumn('to_drop',when(col('medallion').isNull(),True)
                                     .when(col('hack_license').isNull(),True)
                                     .when(col('vendor_id').isNull(),True)
@@ -73,8 +83,7 @@ def drop_nulls_and_track(base_path, folder_name, file_number, df):
                                     .when(col('trip_distance').isNull(),True)
                                     .when(col('pickup_longitude').isNull(),True)
                                     .when(col('pickup_latitude').isNull(),True)
-                                    .otherwise(False))\
-                                    .drop(*unnecessary_trips_columns_list)
+                                    .otherwise(False))
     else:
         df = df.withColumn('to_drop',when(col('medallion').isNull(),True)
                                     .when(col('hack_license').isNull(),True)
@@ -84,7 +93,6 @@ def drop_nulls_and_track(base_path, folder_name, file_number, df):
                                     .when(col('tip_amount').isNull(),True)
                                     .when(col('total_amount').isNull(),True)
                                     .otherwise(False))\
-                                    .drop(*unnecessary_fares_columns_list)
     
     # tracking the rows dropped
     df.agg(
@@ -94,24 +102,14 @@ def drop_nulls_and_track(base_path, folder_name, file_number, df):
         .withColumn('removed_pct',when(col('rows_removed') == 0,0.0)
                                 .otherwise((col('rows_removed') / col('total_rows')) * 100.0))\
         .withColumn('file',lit(f'{folder_name}'))\
-        .withColumn('file_number',lit(f'{file_number}'))\
+        .withColumn('file_number',lit(f'{month}'))\
         .select('file','file_number','total_rows','rows_removed','removed_pct')\
-        .write.format('parquet').mode('append').save(base_path + 'removed_rows_track/')
+        .write.format('parquet').mode('append').save(base_path + 'processed_datatset/removed_rows_track/')
     
-    return df
-
-def standardize_and_partition(base_path, folder_name, df):
-    path = base_path + folder_name + '_processed/'
-
-    # to be used for partitioning files and keep only non-null values
-    df = df.withColumn('year',year(col('pickup_datetime')))\
-           .withColumn('month',month(col('pickup_datetime')))\
-           .filter(~(col('to_drop')==True))\
-           .drop('to_drop')
-
-    #only trips data pickup_dateime needs to standardize
+    #only trip data pickup_dateime needs to standardize
     if folder_name == 'trips_data':
         df.withColumn('minute',minute(col('pickup_datetime')))\
+          .filter(~(col('to_drop')==True))\
           .select("*",date_format(date_trunc('hour','pickup_datetime'),'HH:mm').alias("pickup_time_trunced_hour"))\
           .withColumn('pickup_time',when(col('minute').between(0,15),col('pickup_time_trunced_hour') + expr('INTERVAL 15 MINUTES'))
                                         .when(col('minute').between(16,30),col('pickup_time_trunced_hour') + expr('INTERVAL 30 MINUTES'))
@@ -119,49 +117,62 @@ def standardize_and_partition(base_path, folder_name, df):
                                         .otherwise(col('pickup_time_trunced_hour') + expr('INTERVAL 1 HOURS')))\
           .withColumn('pickup_time',date_format(col('pickup_time'),'HH:mm'))\
           .drop('minute','pickup_time_trunced_hour')\
-          .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path)
+          .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path_to_save)
 
-    # for fares data no need to standardize just partition files
+    # for fare data no need to standardize just save
     else:
-        df.write.partitionBy('year','month').format('parquet').mode('overwrite').save(path)
-
+        df.filter(~(col('to_drop')==True))\
+          .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path_to_save)
+    
     return None
 
 def trips_join_fares(base_path, year, month, df1, df2):
-    path = base_path + f'trips_fares_processed/year={year}/month={month}/'
-    join_conditions = [df1.medallion == df2.medallion, df1.hack_license == df2.hack_license, 
-                       df1.vendor_id == df2.vendor_id, df1.pickup_datetime == df2.pickup_datetime]
+    path_to_save = base_path + 'processed_dataset/' + f'trip_fare_merge/year={year}/month={month}/'
+    join_conditions = [df1.medallion == df2.medallion, 
+                       df1.hack_license == df2.hack_license, 
+                       df1.vendor_id == df2.vendor_id, 
+                       df1.pickup_datetime == df2.pickup_datetime]
 
     df1.join(df2,join_conditions,'inner')\
        .select(df1["*"],'fare_amount','tip_amount','total_amount')\
-       .write.format('parquet').mode('overwrite').save(path)
+       .write.format('parquet').mode('overwrite').save(path_to_save)
        
     return None
 
 def main():
-    #### parameters ### 
-    base_path = 'your/path/here/' + '/Machine-Learning-Projects/nyc_taxi_trips_and_fares/'
-    folder_names_list = ['trips_data','fares_data']
+    # parameters #
+    base_path =  'C:/Users/rizvi/Downloads' + '/Machine-Learning-Projects/nyc_taxi_trips_and_fares_analysis/'
+    folder_names_list = ['trip_data','fare_data']
     file_start_number = 1
     file_end_number   = 2
     file_year_start   = 2013
     file_year_end     = 2014
 
-    # process trips and fares separately then save in their respective processed folder
-    for file_number in range(file_start_number,file_end_number):
-        for folder_name in folder_names_list:
-            df_original = csv_reader(base_path, folder_name, file_number)                  # reading csv file of trips and their fares
-            df_0 = drop_nulls_and_track(base_path, folder_name, file_number, df_original)  # to drop unnecessary columns and label null columns for kept columns
-            standardize_and_partition(base_path, folder_name, df_0)                        # readable pickup time based on conditions so easier to read and evaluate
+    # will delete this directory because changes get appended to avoid duplication 
+    if os.path.isdir(base_path + 'removed_rows_track'):
+        shutil.rmtree(base_path + 'removed_rows_track')
 
+    # process trips and fares separately then save in their respective processed folder
+    for file_number in range(file_start_number,file_end_number): # represents month
+        for folder_name in folder_names_list:
+            csv_reader_and_partition(base_path, folder_name, file_number) # reading csv file of trips and their fares then partition file by year and month 
+                 
         for year in range(file_year_start,file_year_end): # join trips and fares data 
-            trips_processed_df = spark.read.parquet(base_path + folder_names_list[0] + f'_processed/year={year}/month={file_number}/*')
-            fares_processed_df = spark.read.parquet(base_path + folder_names_list[1] + f'_processed/year={year}/month={file_number}/*')
+            track_and_standardize(base_path, folder_names_list[0], year, file_number)  # track null columns dropped and standardize pickup time for trip
+            track_and_standardize(base_path, folder_names_list[1], year, file_number)  # track null columns dropped and standardize pickup time for fare
+
+            trips_processed_df = spark.read.parquet(base_path + 'processed_dataset/' + folder_names_list[0] + f'/year={year}/month={file_number}/*')
+            fares_processed_df = spark.read.parquet(base_path + 'processed_dataset/' + folder_names_list[1] + f'/year={year}/month={file_number}/*')
             trips_join_fares(base_path, year, file_number, trips_processed_df, fares_processed_df) #join trips data to fares data
+
+            #removes un-wanted data (a month from trip and fare of that year)
+            for i in range(0,2):
+                shutil.rmtree(base_path + 'partitioned_dataset/' + folder_names_list[i] + f'/year={year}/month={file_number}')
+                shutil.rmtree(base_path + 'processed_dataset/'   + folder_names_list[i] + f'/year={year}/month={file_number}')
 
 if __name__ == '__main__':
     spark = SparkSession.builder\
-        .master("local")\
+        .master("local[*]")\
         .appName("sparky")\
         .getOrCreate()
 
