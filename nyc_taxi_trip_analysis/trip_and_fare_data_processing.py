@@ -10,14 +10,36 @@ from pyspark.sql.types import (StructField, StructType, StringType, IntegerType,
                               FloatType, DecimalType, TimestampNTZType)
 
 
-def csv_reader_and_partition(base_path, folder_name, file_number):
-    path_to_read = base_path + 'original_dataset/'    + folder_name + '/' + folder_name + '_' + str(file_number) + '.csv'
-    path_to_save = base_path + 'partitioned_dataset/' + folder_name + '/'
+# defines path to be read from or saved to
+def path_definer(folder_name, sub_folder_name, file_name=None, year=None, month=None, asterisk=False, upto_dir=False):
+    path = 'Hello Kitty'
+
+    if file_name is not None:
+        path =  base_path + folder_name + '/' + sub_folder_name + '/' + file_name + '/'
+    
+    elif year is not None:
+        path =  base_path + folder_name + '/' + sub_folder_name + '/' + f'year={year}/month={month}/'
+        if asterisk:
+            path = path + '*'
+        if upto_dir:
+            path = path.removesuffix('/')
+    
+    else:
+        path =  base_path + folder_name + '/' + sub_folder_name + '/'
+        if upto_dir:
+            path = path.removesuffix('/')
+
+    return path
+
+def csv_reader_and_partition(folder_name, file_number): #read csv file and partitions it
+    file_name = folder_name + '_' + str(file_number) + '.csv'
+    path_to_read = path_definer('original_dataset', folder_name, file_name)
+    path_to_save = path_definer('partitioned_dataset', folder_name)
     schema = 'Hello Kitty'
     drop_unnecessary_columns_list = []
 
-    # schema structure for trips data
-    if folder_name == 'trips_data':
+    # schema structure for trip data
+    if folder_name == 'trip_data':
         schema = StructType([
             StructField('medallion',StringType(),True),
             StructField('hack_license',StringType(),True),
@@ -36,9 +58,9 @@ def csv_reader_and_partition(base_path, folder_name, file_number):
         ])
 
         drop_unnecessary_columns_list = ['rate_code','store_and_fwd_flag','dropoff_datetime','passenger_count',
-                                      'dropoff_latitude','dropoff_longitude']
+                                         'dropoff_latitude','dropoff_longitude']
 
-    # schema structure for fares data
+    # schema structure for trip fare data
     else:
         schema = StructType([
             StructField('medallion',StringType(),True),
@@ -55,7 +77,7 @@ def csv_reader_and_partition(base_path, folder_name, file_number):
         ])
 
         drop_unnecessary_columns_list = ['payment_type','surcharge','mta_tax','tolls_amount']
-    
+
     #read csv file and partition it by year and month
     spark.read\
     .option("delimiter",",")\
@@ -69,9 +91,12 @@ def csv_reader_and_partition(base_path, folder_name, file_number):
 
     return None
 
-def track_and_standardize(base_path, folder_name, year, month):
-    path_to_read =  base_path + 'partitioned_dataset/' + folder_name + f'year={year}/month={month}/*' 
-    path_to_save =  base_path + 'processed_dataset/'   + folder_name + f'year={year}/month={month}/'
+# tracks the rows removed and standardize pickup_datatime
+def track_and_standardize(folder_name, year, month):
+    path_to_read =  path_definer('partitioned_dataset', folder_name, year=year, month=month, asterisk=True)
+    path_to_save_null_tracker =  path_definer('processed_dataset', 'removed_rows_track')
+    path_to_save_standardize  =  path_definer('processed_dataset', folder_name, year=year, month=month)
+
     df = spark.read.parquet(path_to_read)
 
     if folder_name == 'trip_data': 
@@ -104,30 +129,32 @@ def track_and_standardize(base_path, folder_name, year, month):
         .withColumn('file',lit(f'{folder_name}'))\
         .withColumn('file_number',lit(f'{month}'))\
         .select('file','file_number','total_rows','rows_removed','removed_pct')\
-        .write.format('parquet').mode('append').save(base_path + 'processed_datatset/removed_rows_track/')
+        .write.format('parquet').mode('append').save(path_to_save_null_tracker)
     
     #only trip data pickup_dateime needs to standardize
-    if folder_name == 'trips_data':
+    if folder_name == 'trip_data':
         df.withColumn('minute',minute(col('pickup_datetime')))\
           .filter(~(col('to_drop')==True))\
           .select("*",date_format(date_trunc('hour','pickup_datetime'),'HH:mm').alias("pickup_time_trunced_hour"))\
-          .withColumn('pickup_time',when(col('minute').between(0,15),col('pickup_time_trunced_hour') + expr('INTERVAL 15 MINUTES'))
-                                        .when(col('minute').between(16,30),col('pickup_time_trunced_hour') + expr('INTERVAL 30 MINUTES'))
-                                        .when(col('minute').between(31,45),col('pickup_time_trunced_hour') + expr('INTERVAL 45 MINUTES'))
+          .withColumn('pickup_time',when(col('minute').between(0,7),col('pickup_time_trunced_hour'))
+                                        .when(col('minute').between(8,20), col('pickup_time_trunced_hour') + expr('INTERVAL 15 MINUTES'))
+                                        .when(col('minute').between(21,35),col('pickup_time_trunced_hour') + expr('INTERVAL 30 MINUTES'))
+                                        .when(col('minute').between(36,50),col('pickup_time_trunced_hour') + expr('INTERVAL 45 MINUTES'))
                                         .otherwise(col('pickup_time_trunced_hour') + expr('INTERVAL 1 HOURS')))\
           .withColumn('pickup_time',date_format(col('pickup_time'),'HH:mm'))\
-          .drop('minute','pickup_time_trunced_hour')\
-          .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path_to_save)
+          .drop('minute','pickup_time_trunced_hour','to_drop')\
+          .write.format('parquet').mode('overwrite').save(path_to_save_standardize)
 
-    # for fare data no need to standardize just save
+    # for trip fare data no need to standardize just save
     else:
         df.filter(~(col('to_drop')==True))\
-          .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path_to_save)
+          .write.format('parquet').mode('overwrite').save(path_to_save_standardize)
     
     return None
 
-def trips_join_fares(base_path, year, month, df1, df2):
-    path_to_save = base_path + 'processed_dataset/' + f'trip_fare_merge/year={year}/month={month}/'
+# joins trip_data and trip_fare_data for the year and month
+def trip_join_trip_fare(year, month, df1, df2):
+    path_to_save = path_definer('processed_dataset','trip_and_trip_fare_merge', year=year, month=month)
     join_conditions = [df1.medallion == df2.medallion, 
                        df1.hack_license == df2.hack_license, 
                        df1.vendor_id == df2.vendor_id, 
@@ -140,40 +167,51 @@ def trips_join_fares(base_path, year, month, df1, df2):
     return None
 
 def main():
-    # parameters #
-    base_path =  'C:/Users/rizvi/Downloads' + '/Machine-Learning-Projects/nyc_taxi_trips_and_fares_analysis/'
-    folder_names_list = ['trip_data','fare_data']
-    file_start_number = 1
-    file_end_number   = 2
-    file_year_start   = 2013
-    file_year_end     = 2014
+    # will delete this directory because changes get appended so to avoid duplication 
+    if os.path.isdir(path_definer('processed_dataset', 'removed_rows_track', upto_dir=True)):
+        shutil.rmtree(path_definer('processed_dataset', 'removed_rows_track', upto_dir=True))
 
-    # will delete this directory because changes get appended to avoid duplication 
-    if os.path.isdir(base_path + 'removed_rows_track'):
-        shutil.rmtree(base_path + 'removed_rows_track')
-
-    # process trips and fares separately then save in their respective processed folder
-    for file_number in range(file_start_number,file_end_number): # represents month
+    # process trip and trip fare separately then save in their respective processed folder
+    for file_number in range(file_start_number, file_end_number):
         for folder_name in folder_names_list:
-            csv_reader_and_partition(base_path, folder_name, file_number) # reading csv file of trips and their fares then partition file by year and month 
+            csv_reader_and_partition(folder_name, file_number)  # reading csv file of trip and their fare then partition file by year and month 
                  
-        for year in range(file_year_start,file_year_end): # join trips and fares data 
-            track_and_standardize(base_path, folder_names_list[0], year, file_number)  # track null columns dropped and standardize pickup time for trip
-            track_and_standardize(base_path, folder_names_list[1], year, file_number)  # track null columns dropped and standardize pickup time for fare
+    # get directory of years into list then directory of months for that year and iterate over this
+    dir_list = [dir_item for dir_item in os.listdir(path_definer('partitioned_dataset', folder_names_list[0], upto_dir=True))]
+    year_list = [int(dir_item.removeprefix('year=')) for dir_item in dir_list if dir_item.startswith('year=')]
 
-            trips_processed_df = spark.read.parquet(base_path + 'processed_dataset/' + folder_names_list[0] + f'/year={year}/month={file_number}/*')
-            fares_processed_df = spark.read.parquet(base_path + 'processed_dataset/' + folder_names_list[1] + f'/year={year}/month={file_number}/*')
-            trips_join_fares(base_path, year, file_number, trips_processed_df, fares_processed_df) #join trips data to fares data
+    for year in year_list:
+        dir_list = [dir_item for dir_item in os.listdir(path_definer('partitioned_dataset', f'trip_data/year={year}', upto_dir=True))]
+        month_list = [int(dir_item.removeprefix('month=')) for dir_item in dir_list if dir_item.startswith('month=')]
 
-            #removes un-wanted data (a month from trip and fare of that year)
-            for i in range(0,2):
-                shutil.rmtree(base_path + 'partitioned_dataset/' + folder_names_list[i] + f'/year={year}/month={file_number}')
-                shutil.rmtree(base_path + 'processed_dataset/'   + folder_names_list[i] + f'/year={year}/month={file_number}')
+        for month in month_list:  # join trip and trip fare data
+            if os.path.isdir(path_definer('partitioned_dataset', 'trip_fare', year=year, month=month, upto_dir=True)): # pre-caution if trip_fare for that month does not exist
+                track_and_standardize(folder_names_list[0], year, month)  # track null columns dropped and standardize pickup time for trip
+                track_and_standardize(folder_names_list[1], year, month)  # track null columns dropped and standardize pickup time for trip fare
+
+                trip_processed_path = path_definer('processed_dataset', folder_names_list[0], year=year, month=month, asterisk=True) 
+                trip_fare_processed_path = path_definer('processed_dataset', folder_names_list[1], year=year, month=month, asterisk=True)
+
+                trip_processed_df = spark.read.parquet(trip_processed_path) 
+                trip_fare_processed_df = spark.read.parquet(trip_fare_processed_path)
+
+                trip_join_trip_fare(year, file_number, trip_processed_df, trip_fare_processed_df)
+                
+                # removes un-wanted data (a month from trip and trip fare of that year)
+                for i in range(0,2):
+                    shutil.rmtree(path_definer('partitioned_dataset', folder_names_list[i], year=year, month=month, upto_dir=True))
+                    shutil.rmtree(path_definer('processed_dataset', folder_names_list[i], year=year, month=month, upto_dir=True))
 
 if __name__ == '__main__':
     spark = SparkSession.builder\
         .master("local[*]")\
         .appName("sparky")\
         .getOrCreate()
+
+    # parameters #
+    base_path = 'C:/Users/rizvi/Downloads' + '/machine-learning-projects/nyc_taxi_trip_analysis/'
+    folder_names_list = ['trip_data','trip_fare']
+    file_start_number = 1
+    file_end_number = 2
 
     main()
