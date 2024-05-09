@@ -4,21 +4,20 @@ import pandas as pd
 import numpy as np
 from geopy.geocoders import Nominatim
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (col, when, lit, year, month, minute, 
-                                   date_trunc, date_format, count, expr)
+from pyspark.sql.functions import (col, when, lit, date_trunc, 
+                                  date_format, minute, count, expr)
 from pyspark.sql.types import (StructField, StructType, StringType, IntegerType, 
                               FloatType, DecimalType, TimestampNTZType)
 
-
 # defines path to be read from or saved to
-def path_definer(folder_name, sub_folder_name, file_name=None, year=None, month=None, asterisk=False, upto_dir=False):
+def path_definer(folder_name, sub_folder_name, file_name=None, month=None, asterisk=False, upto_dir=False):
     path = 'Hello Kitty'
 
     if file_name is not None:
         path =  base_path + folder_name + '/' + sub_folder_name + '/' + file_name + '/'
     
-    elif year is not None:
-        path =  base_path + folder_name + '/' + sub_folder_name + '/' + f'year={year}/month={month}/'
+    elif month is not None:
+        path =  base_path + folder_name + '/' + sub_folder_name + '/' + f'/month={month}/'
         if asterisk:
             path = path + '*'
         if upto_dir:
@@ -34,7 +33,7 @@ def path_definer(folder_name, sub_folder_name, file_name=None, year=None, month=
 def csv_reader_and_partition(folder_name, file_number): #read csv file and partitions it
     file_name = folder_name + '_' + str(file_number) + '.csv'
     path_to_read = path_definer('original_dataset', folder_name, file_name)
-    path_to_save = path_definer('partitioned_dataset', folder_name)
+    path_to_save = path_definer('partitioned_dataset', folder_name, month=file_number)
     schema = 'Hello Kitty'
     drop_unnecessary_columns_list = []
 
@@ -78,24 +77,22 @@ def csv_reader_and_partition(folder_name, file_number): #read csv file and parti
 
         drop_unnecessary_columns_list = ['payment_type','surcharge','mta_tax','tolls_amount']
 
-    #read csv file and partition it by year and month
+    #read csv file and partition it by month
     spark.read\
     .option("delimiter",",")\
     .option("header", "true")\
     .schema(schema)\
     .csv(path_to_read)\
-    .withColumn('year',year(col('pickup_datetime')))\
-    .withColumn('month',month(col('pickup_datetime')))\
     .drop(*drop_unnecessary_columns_list)\
-    .write.partitionBy('year','month').format('parquet').mode('overwrite').save(path_to_save)
+    .write.format('parquet').mode('overwrite').save(path_to_save)
 
     return None
 
 # tracks the rows removed and standardize pickup_datatime
-def track_and_standardize(folder_name, year, month):
-    path_to_read =  path_definer('partitioned_dataset', folder_name, year=year, month=month, asterisk=True)
+def track_and_standardize(folder_name, month):
+    path_to_read =  path_definer('partitioned_dataset', folder_name, month=month, asterisk=True)
     path_to_save_null_tracker =  path_definer('processed_dataset', 'removed_rows_track')
-    path_to_save_standardize  =  path_definer('processed_dataset', folder_name, year=year, month=month)
+    path_to_save_standardize  =  path_definer('processed_dataset', folder_name, month=month)
 
     df = spark.read.parquet(path_to_read)
 
@@ -152,9 +149,9 @@ def track_and_standardize(folder_name, year, month):
     
     return None
 
-# joins trip_data and trip_fare_data for the year and month
-def trip_join_trip_fare(year, month, df1, df2):
-    path_to_save = path_definer('processed_dataset','trip_and_trip_fare_merge', year=year, month=month)
+# joins trip_data and trip_fare_data for that month
+def trip_join_trip_fare(month, df1, df2):
+    path_to_save = path_definer('processed_dataset','trip_and_trip_fare_merge', month=month)
     join_conditions = [df1.medallion == df2.medallion, 
                        df1.hack_license == df2.hack_license, 
                        df1.vendor_id == df2.vendor_id, 
@@ -172,35 +169,29 @@ def main():
         shutil.rmtree(path_definer('processed_dataset', 'removed_rows_track', upto_dir=True))
 
     # process trip and trip fare separately then save in their respective processed folder
-    for file_number in range(file_start_number, file_end_number):
+    for file_number in range(file_start_number, file_end_number): # represents month
         for folder_name in folder_names_list:
-            csv_reader_and_partition(folder_name, file_number)  # reading csv file of trip and their fare then partition file by year and month 
-                 
-    # get directory of years into list then directory of months for that year and iterate over this
-    dir_list = [dir_item for dir_item in os.listdir(path_definer('partitioned_dataset', folder_names_list[0], upto_dir=True))]
-    year_list = [int(dir_item.removeprefix('year=')) for dir_item in dir_list if dir_item.startswith('year=')]
+            csv_reader_and_partition(folder_name, file_number)   # reading csv file of trip and their fare and save it by month = file_number
 
-    for year in year_list:
-        dir_list = [dir_item for dir_item in os.listdir(path_definer('partitioned_dataset', f'trip_data/year={year}', upto_dir=True))]
-        month_list = [int(dir_item.removeprefix('month=')) for dir_item in dir_list if dir_item.startswith('month=')]
+        # process trip and trip fare data for that month or file_number:
+        track_and_standardize(folder_names_list[0], month=file_number)  # track null columns dropped and standardize pickup time for trip
+        track_and_standardize(folder_names_list[1], month=file_number)  # track null columns dropped and standardize pickup time for trip fare
 
-        for month in month_list:  # join trip and trip fare data
-            if os.path.isdir(path_definer('partitioned_dataset', 'trip_fare', year=year, month=month, upto_dir=True)): # pre-caution if trip_fare for that month does not exist
-                track_and_standardize(folder_names_list[0], year, month)  # track null columns dropped and standardize pickup time for trip
-                track_and_standardize(folder_names_list[1], year, month)  # track null columns dropped and standardize pickup time for trip fare
+        # define paths for trip and trip fare processed data
+        trip_processed_path = path_definer('processed_dataset', folder_names_list[0], month=file_number, asterisk=True)  # define a path for trip processed data
+        trip_fare_processed_path = path_definer('processed_dataset', folder_names_list[1], month=file_number, asterisk=True) # define a path for trip fare processed data
 
-                trip_processed_path = path_definer('processed_dataset', folder_names_list[0], year=year, month=month, asterisk=True) 
-                trip_fare_processed_path = path_definer('processed_dataset', folder_names_list[1], year=year, month=month, asterisk=True)
+        # use defined paths to read trip and trip fare processed data
+        trip_processed_df = spark.read.parquet(trip_processed_path) 
+        trip_fare_processed_df = spark.read.parquet(trip_fare_processed_path)
 
-                trip_processed_df = spark.read.parquet(trip_processed_path) 
-                trip_fare_processed_df = spark.read.parquet(trip_fare_processed_path)
-
-                trip_join_trip_fare(year, file_number, trip_processed_df, trip_fare_processed_df)
-                
-                # removes un-wanted data (a month from trip and trip fare of that year)
-                for i in range(0,2):
-                    shutil.rmtree(path_definer('partitioned_dataset', folder_names_list[i], year=year, month=month, upto_dir=True))
-                    shutil.rmtree(path_definer('processed_dataset', folder_names_list[i], year=year, month=month, upto_dir=True))
+        # once read trip and trip fare processed data is read then join them
+        trip_join_trip_fare(file_number, trip_processed_df, trip_fare_processed_df)
+        
+        # removes un-wanted month's trip and trip fare data
+        for i in range(0,2):
+            shutil.rmtree(path_definer('partitioned_dataset', folder_names_list[i], month=file_number, upto_dir=True))
+            shutil.rmtree(path_definer('processed_dataset', folder_names_list[i], month=file_number, upto_dir=True))
 
 if __name__ == '__main__':
     spark = SparkSession.builder\
