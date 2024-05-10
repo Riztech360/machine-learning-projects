@@ -206,6 +206,5 @@ if __name__ == '__main__':
     folder_names_list = ['trip_data','trip_fare']
     file_start_number = 1
     file_end_number = max([int(re.search("(\d+)", file).group(1)) for file in os.listdir(path_definer('original_dataset', folder_names_list[0], upto_dir=True))]) + 1
-    print(file_end_number)
 
-    #main()
+    main()
