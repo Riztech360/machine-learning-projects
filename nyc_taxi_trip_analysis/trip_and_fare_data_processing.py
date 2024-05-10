@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import pandas as pd
 import numpy as np
@@ -201,9 +202,10 @@ if __name__ == '__main__':
         .getOrCreate()
 
     # parameters #
-    base_path = 'C:/Users/rizvi/Downloads' + '/machine-learning-projects/nyc_taxi_trip_analysis/'
+    base_path = 'C:/your/path/to/repo' + '/machine-learning-projects/nyc_taxi_trip_analysis/'
     folder_names_list = ['trip_data','trip_fare']
     file_start_number = 1
-    file_end_number = 2
-
-    main()
+    file_end_number = max([re.search("(\d+)", file).group(1) for file in os.list(path_definer('original_dataset', folder_names_list[0], upto_dir=True))])
+    
+    
+    #main()
