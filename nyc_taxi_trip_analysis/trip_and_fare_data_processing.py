@@ -188,8 +188,9 @@ def main():
         # once read trip and trip fare processed data is read then join them
         trip_join_trip_fare(file_number, trip_processed_df, trip_fare_processed_df)
         
-        # removes un-wanted month's trip and trip fare data
+        # removes un-wanted month's trip and trip fare data and the original file to save space 
         for i in range(0,2):
+            os.remove(path_definer('original_dataset', folder_names_list[i], file_name=f'{folder_names_list[i]}_{file_number}.csv'))
             shutil.rmtree(path_definer('partitioned_dataset', folder_names_list[i], month=file_number, upto_dir=True))
             shutil.rmtree(path_definer('processed_dataset', folder_names_list[i], month=file_number, upto_dir=True))
 
