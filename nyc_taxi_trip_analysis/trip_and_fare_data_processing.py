@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import shutil
 import pandas as pd
 import numpy as np
@@ -194,6 +195,8 @@ def main():
             os.remove(path_definer('original_dataset', folder_names_list[i], file_name=f'{folder_names_list[i]}_{file_number}.csv'))
             shutil.rmtree(path_definer('partitioned_dataset', folder_names_list[i], month=file_number, upto_dir=True))
             shutil.rmtree(path_definer('processed_dataset', folder_names_list[i], month=file_number, upto_dir=True))
+
+        time.sleep(60) # delay of 1min to take load of thread
 
 if __name__ == '__main__':
     spark = SparkSession.builder\
